@@ -211,12 +211,10 @@ local function get_index_function(ystride, zstride)
 end
 
 -- Returns false if it fails
-local function generate_chunk(modelinfo, model_strides, region, model)
+local function generate_chunk(modelinfo, index_model, region, model)
 	-- Start and end positions in the region
 	local p1 = region[1]
 	local p2 = region[2]
-	-- Function which returns an index in the model array
-	local index_model = get_index_function(model_strides.y, model_strides.z)
 	-- Save the current model in the region for the failure case
 	local model_backup = {}
 	for z = p1.z, p2.z do
@@ -267,23 +265,31 @@ local function generate_chunk(modelinfo, model_strides, region, model)
 	end
 	-- Apply AC3 as preprocessing to remove invalid labels from the catalog
 	constraints = modelinfo.adjacencies
+	local catalog_strides = {x = 1, y = wc, z = hc * wc}
 	local arcs = {}
-	for cz = 0, lc do
-		for cy = 0, hc do
-			for cx = 0, wc do
-				-- TODO: add arcs
+	local num_arcs = 0
+	-- Arcs to the border of the catalog don't need to be added
+	for cz = 1, lc - 2 do
+		for cy = 1, hc - 2 do
+			for cx = 1, wc - 2 do
+				-- Add arcs from all possible neighbours
+				local ci = vector_index(x, y, z, wc, hc * wc)
+				arcs[num_arcs+1] = {ci - catalog_strides.x, catalog_strides.x}
+				arcs[num_arcs+2] = {ci + catalog_strides.x, -catalog_strides.x}
+				arcs[num_arcs+3] = {ci - catalog_strides.y, catalog_strides.y}
+				arcs[num_arcs+4] = {ci + catalog_strides.y, -catalog_strides.y}
+				arcs[num_arcs+5] = {ci - catalog_strides.z, catalog_strides.z}
+				arcs[num_arcs+6] = {ci + catalog_strides.z, -catalog_strides.z}
+				num_arcs = num_arcs + 6
 			end
 		end
 	end
-	local catalog_strides = {x = 1, y = wc, z = hc * wc}
 	local arcs_stack = datastructures.create_stack{input = arcs}
 	-- Here the catalog should have at least one label for each position
 	apply_neighbour_constraints(constraints, catalog_strides, num_labels,
 		catalog, arcs_stack)
 
 	-- Do the Discrete Model Synthesis in the region
-	local start_offset = vector_index(p1[1]-1, p1[2]-1, p1[3]-1,
-		model_strides.y, model_strides.z)
 	for z = 1, lc-2 do
 		for y = 1, hc-2 do
 			-- Index for the model
@@ -298,7 +304,18 @@ local function generate_chunk(modelinfo, model_strides, region, model)
 					end
 				end
 				if #possible_labels == 0 then
-					-- TODO reset to model backup
+					-- It failed, so reset the model to its backup
+					local backup_i = 1
+					for z = p1.z, p2.z do
+						for y = p1.y, p2.y do
+							local mi = index_model(p1[1], y, z)
+							for x = p1.x, p2.x do
+								model[mi] = model_backup[backup_i]
+								backup_i = backup_i+1
+								mi = mi+1
+							end
+						end
+					end
 					return false
 				end
 
@@ -368,12 +385,20 @@ local function generate_model(pos1, pos2, modelinfo)
 			end
 		end
 	end
+	-- Function which returns an index in the model array
+	local index_model = get_index_function(wo, ho * wo)
 	-- Generate in each region, add more regions if it failed
 	repeat
 		local region = regions:take()
-		local p1 = region[1]
-		local p2 = region[2]
-		-- TODO: generate region and subdivide if failed
+		if not generate_chunk(modelinfo, index_model, region, model) then
+			-- It failed, so subdivide the region
+			local p1 = region[1]
+			local p2 = region[2]
+			local region_sizes = {}
+			-- 3*3*3 new regions
+			-- TODO
+
+		end
 	until regions.is_empty()
 end
 
