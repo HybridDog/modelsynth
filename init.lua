@@ -132,7 +132,7 @@ local function generate_modelinfo(pos1, pos2)
 	return {
 		num_labels = num_labels,
 		labels = labels,
-		nodeids = nodeids,
+		nodeids = id_to_nodename,
 		adjacencies = adjacencies,
 		special_labels = special_labels,
 	}
@@ -448,6 +448,7 @@ local function generate_model(pos1, pos2, modelinfo)
 			end
 		end
 	until regions:is_empty()
+	-- TODO: put nodes!
 end
 
 local version_head = "modelsynth_v0\n"
