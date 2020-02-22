@@ -1,6 +1,15 @@
 local path = minetest.get_modpath"modelsynth"
 local datastructures = dofile(path .. "/datastructures.lua")
 
+local function dump_region(r)
+	return ("Region (%d - %d, %d - %d, %d - %d)"):format(r[1][1], r[2][1],
+		r[1][2], r[2][2], r[1][3], r[2][3])
+end
+local function log(msg)
+	print(msg)
+	minetest.chat_send_all(msg)
+end
+
 local function get_label_key(data)
 	return data[1] .. "," .. data[2] .. "," .. data[3]
 	--~ return table.concat(data, ",")
@@ -43,7 +52,7 @@ local function generate_modelinfo(pos1, pos2)
 				for x = pos1.x, pos2.x do
 					-- The label consists of 1x3x1 nodes
 					local vi_bottom = area:index(x, y, z)
-					local vi_middle = vi + area.ystride
+					local vi_middle = vi_bottom + area.ystride
 					local vi_top = vi_middle + area.ystride
 					local label = {nodes[vi_bottom], nodes[vi_middle],
 						nodes[vi_top]}
@@ -100,11 +109,11 @@ local function generate_modelinfo(pos1, pos2)
 
 	-- Save node names so that the nodes in the labels are not ephemeral
 	local id_to_nodename = {}
-	for k = 1,num_labels do
+	for k = 0,num_labels-1 do
 		local label = labels[k]
 		for j = 1,3 do
 			local nodeid = label[j]
-			id_to_nodename[nodeid] = d_to_nodename[nodeid]
+			id_to_nodename[nodeid] = id_to_nodename[nodeid]
 				or minetest.get_name_from_content_id(nodeid)
 		end
 	end
@@ -112,7 +121,7 @@ local function generate_modelinfo(pos1, pos2)
 	-- Find the empty space and other special labels, this code is not yet
 	-- flexible
 	-- They are used for the intial model and boundary conditions
-	local airid = minetest.get_name_from_content_id"air"
+	local airid = minetest.get_content_id"air"
 	local k = get_label_key{airid, airid, airid}
 	local air_label_id = label_indices[k]
 	if not air_label_id then
@@ -159,7 +168,7 @@ end
 
 -- An implementation of Arc Consistency
 local function apply_neighbour_constraints(constraints, catalog_strides,
-		num_labels, catalog, arcs_stack)
+		num_labels, catalog, arcs_queue)
 	-- The strides represent the direction, e.g. +X, -X
 	local strides = {catalog_strides.x, -catalog_strides.x, catalog_strides.y,
 		-catalog_strides.y, catalog_strides.z, -catalog_strides.z}
@@ -172,9 +181,8 @@ local function apply_neighbour_constraints(constraints, catalog_strides,
 		[catalog_strides.z] = constraints.z,
 		[-catalog_strides.z] = constraints.z
 	}
-	-- FIXME: Maybe a FIFO queue works better here
-	while not arcs_stack:is_empty() do
-		local arc = arcs_stack:pop()
+	while not arcs_queue:is_empty() do
+		local arc = arcs_queue:take()
 		local ci_prev = arc[1]
 		local stride = arc[2]
 		local ci = ci_prev + stride
@@ -197,7 +205,7 @@ local function apply_neighbour_constraints(constraints, catalog_strides,
 			for i = 1,#strides do
 				local next_stride = strides[i]
 				if next_stride ~= stride then
-					arcs_stack:push{ci, next_stride}
+					arcs_queue:add{ci, next_stride}
 				end
 			end
 		end
@@ -212,15 +220,16 @@ end
 
 -- Returns false if it fails
 local function generate_chunk(modelinfo, index_model, region, model)
+	local num_labels = modelinfo.num_labels
 	-- Start and end positions in the region
 	local p1 = region[1]
 	local p2 = region[2]
 	-- Save the current model in the region for the failure case
 	local model_backup = {}
-	for z = p1.z, p2.z do
-		for y = p1.y, p2.y do
+	for z = p1[3], p2[3] do
+		for y = p1[2], p2[2] do
 			local mi = index_model(p1[1], y, z)
-			for x = p1.x, p2.x do
+			for x = p1[1], p2[1] do
 				model_backup[#model_backup+1] = model[mi]
 				mi = mi+1
 			end
@@ -238,7 +247,6 @@ local function generate_chunk(modelinfo, index_model, region, model)
 		return index_model(p1[1]-1 + cx, p1[2]-1 + cy, p1[3]-1 + cz)
 	end
 	-- Initialize catalog
-	local num_labels = modelinfo.num_labels
 	local catalog = {}
 	-- Add all labels to all positions in the catalog
 	for i = 0, wc * hc * lc - 1 do
@@ -263,8 +271,8 @@ local function generate_chunk(modelinfo, index_model, region, model)
 			end
 		end
 	end
-	-- Apply AC3 as preprocessing to remove invalid labels from the catalog
-	constraints = modelinfo.adjacencies
+	-- The preprocessing step: remove invalid labels from the catalog
+	local constraints = modelinfo.adjacencies
 	local catalog_strides = {x = 1, y = wc, z = hc * wc}
 	local arcs = {}
 	local num_arcs = 0
@@ -273,7 +281,9 @@ local function generate_chunk(modelinfo, index_model, region, model)
 		for cy = 1, hc - 2 do
 			for cx = 1, wc - 2 do
 				-- Add arcs from all possible neighbours
-				local ci = vector_index(x, y, z, wc, hc * wc)
+				-- FIXME: actually only arcs from the border to the inside are
+				-- needed
+				local ci = vector_index(cx, cy, cz, wc, hc * wc)
 				arcs[num_arcs+1] = {ci - catalog_strides.x, catalog_strides.x}
 				arcs[num_arcs+2] = {ci + catalog_strides.x, -catalog_strides.x}
 				arcs[num_arcs+3] = {ci - catalog_strides.y, catalog_strides.y}
@@ -284,10 +294,10 @@ local function generate_chunk(modelinfo, index_model, region, model)
 			end
 		end
 	end
-	local arcs_stack = datastructures.create_stack{input = arcs}
+	local arcs_queue = datastructures.create_queue{input = arcs}
 	-- Here the catalog should have at least one label for each position
 	apply_neighbour_constraints(constraints, catalog_strides, num_labels,
-		catalog, arcs_stack)
+		catalog, arcs_queue)
 
 	-- Do the Discrete Model Synthesis in the region
 	for z = 1, lc-2 do
@@ -295,7 +305,7 @@ local function generate_chunk(modelinfo, index_model, region, model)
 			-- Index for the model
 			local mi = index_model_off(1, y, z)
 			-- Index for the catalog
-			local ci = index_catalog(1, y, z)
+			local ci = vector_index(1, y, z, wc, hc * wc)
 			for x = 1, wc-2 do
 				local possible_labels = {}
 				for label = 0, num_labels-1 do
@@ -306,10 +316,10 @@ local function generate_chunk(modelinfo, index_model, region, model)
 				if #possible_labels == 0 then
 					-- It failed, so reset the model to its backup
 					local backup_i = 1
-					for z = p1.z, p2.z do
-						for y = p1.y, p2.y do
+					for z = p1[3], p2[3] do
+						for y = p1[2], p2[2] do
 							local mi = index_model(p1[1], y, z)
-							for x = p1.x, p2.x do
+							for x = p1[1], p2[1] do
 								model[mi] = model_backup[backup_i]
 								backup_i = backup_i+1
 								mi = mi+1
@@ -335,10 +345,10 @@ local function generate_chunk(modelinfo, index_model, region, model)
 					catalog_strides.y, -catalog_strides.y, catalog_strides.z,
 					-catalog_strides.z}
 				for i = 1,#strides do
-					arcs_stack:push{ci, strides[i]}
+					arcs_queue:add{ci, strides[i]}
 				end
 				apply_neighbour_constraints(constraints, catalog_strides,
-					num_labels, catalog, arcs_stack)
+					num_labels, catalog, arcs_queue)
 
 				mi = mi+1
 				ci = ci+1
@@ -349,7 +359,15 @@ local function generate_chunk(modelinfo, index_model, region, model)
 	return true
 end
 
+local function copy_region(region)
+	return {
+		{region[1][1], region[1][2], region[1][3]},
+		{region[2][1], region[2][2], region[2][3]},
+	}
+end
+
 local function generate_model(pos1, pos2, modelinfo)
+	assert(type(modelinfo) == "table", "invalid modelinfo argument")
 	local w = pos2.x - pos1.x
 	local h = pos2.y - pos1.y
 	if h % 3 > 0 then
@@ -385,22 +403,138 @@ local function generate_model(pos1, pos2, modelinfo)
 			end
 		end
 	end
+	assert(not regions:is_empty())
 	-- Function which returns an index in the model array
 	local index_model = get_index_function(wo, ho * wo)
 	-- Generate in each region, add more regions if it failed
 	repeat
 		local region = regions:take()
+		log("Trying to generate region " .. dump_region(region))
 		if not generate_chunk(modelinfo, index_model, region, model) then
+			log("Failed, subdividing…")
 			-- It failed, so subdivide the region
 			local p1 = region[1]
 			local p2 = region[2]
-			local region_sizes = {}
-			-- 3*3*3 new regions
-			-- TODO
-
+			-- Split into 3*3*3 = 27 new overlapping regions
+			local new_regions = {region}
+			for splitdir = 1,3 do
+				local len = p2[splitdir] - p1[splitdir] + 1
+				if len >= 4 then
+					local newlen = math.ceil(len * 0.5)
+					local stride_mid = math.floor(newlen * 0.5)
+					local starts = {p1[splitdir], p1[splitdir] + stride_mid,
+						p1[splitdir] + newlen}
+					local ends = {starts[1] + newlen-1, starts[2] + newlen-1,
+						p2[splitdir]}
+					local previous_split = new_regions
+					new_regions = {}
+					for i = 1,#previous_split do
+						local region = previous_split[i]
+						for k = 1,3 do
+							region = copy_region(region)
+							region[1][splitdir] = starts[k]
+							region[2][splitdir] = ends[k]
+							new_regions[#new_regions+1] = region
+						end
+					end
+				end
+			end
+			if #new_regions > 1 then
+				log("New regions:")
+				for i = 1,#new_regions do
+					regions:add(new_regions[i])
+					log(dump_region(new_regions[i]))
+				end
+			end
 		end
-	until regions.is_empty()
+	until regions:is_empty()
 end
 
--- TODO: save generated model, use worldedit positions, add model synthesis,
--- chatcommands to use this mod
+local version_head = "modelsynth_v0\n"
+
+-- Serialize the table to a string to save it on disk
+local function encode_modelinfo(modelinfo)
+	return version_head ..
+		minetest.serialize(modelinfo)
+end
+
+-- Used when loading a modelinfo from disk
+local function decode_modelinfo(data)
+	if data:sub(1, #version_head) ~= version_head then
+		return nil, "invalid version"
+	end
+	return minetest.deserialize(data:sub(#version_head+1))
+end
+
+worldedit.register_command("gen_mi", {
+	params = "filename",
+	description = "[modelsynth] Generate the model information and save " ..
+		"it to <filename>",
+	privs = {worldedit=true},
+	require_pos = 2,
+	parse = function(param)
+		return true, param:trim()
+	end,
+	func = function(playername, filename)
+		local pos1, pos2 = worldedit.sort_pos(worldedit.pos1[playername],
+			worldedit.pos2[playername])
+		local modelinfo = generate_modelinfo(pos1, pos2)
+		local output_data = encode_modelinfo(modelinfo)
+
+		local path = minetest.get_worldpath() .. "/modelsynth"
+		-- Create directory if needed
+		minetest.mkdir(path)
+
+		local filename = path .. "/" .. filename .. ".dat"
+		local file, err = io.open(filename, "wb")
+		if not file then
+			minetest.chat_send_player(playername, "Cannot save to \"" ..
+				filename .. "\": " .. err)
+			return false
+		end
+		file:write(output_data)
+		file:flush()
+		file:close()
+
+		minetest.chat_send_player(playername, "Saved modelinfo to \"" ..
+			filename .. "\"")
+		return true
+	end,
+})
+
+worldedit.register_command("synth", {
+	params = "filename",
+	description = "[modelsynth] Synthesize a model from the model " ..
+		"information in <filename>",
+	privs = {worldedit=true},
+	require_pos = 2,
+	parse = function(param)
+		return true, param:trim()
+	end,
+	func = function(playername, filename)
+		local pos1, pos2 = worldedit.sort_pos(worldedit.pos1[playername],
+			worldedit.pos2[playername])
+
+		local path = minetest.get_worldpath() .. "/modelsynth"
+		local filename = path .. "/" .. filename .. ".dat"
+		local file, err = io.open(filename, "rb")
+		if not file then
+			minetest.chat_send_player(playername, "Cannot load from \"" ..
+				filename .. "\": " .. err)
+			return false
+		end
+		local data = file:read"*a"
+		file:close()
+
+		local modelinfo, errormsg = decode_modelinfo(data)
+		if not modelinfo then
+			minetest.chat_send_player(playername, "Cannot load modelinfo: " ..
+				errormsg)
+		end
+
+		generate_model(pos1, pos2, modelinfo)
+
+		return true
+	end,
+})
+
