@@ -19,11 +19,6 @@ local function vector_index(x, y, z, ystride, zstride)
 	return z * zstride + y * ystride + x
 end
 
--- label2 should be offset by +X, +Y or +Z from label1
-local function can_neighbour(adjacencies, label1, label2, num_labels)
-	return adjacencies[num_labels * label1 + label2]
-end
-
 local function generate_modelinfo(pos1, pos2)
 	-- Labels are model pieces, indices start from zero
 	local labels = {}
@@ -138,67 +133,148 @@ local function generate_modelinfo(pos1, pos2)
 	}
 end
 
--- Removes invalid labels from a single catalog entry,
--- returns false if nothing has changed
-local function remove_invalid_labels(ci_prev, ci, test_adjacency, num_labels,
-		catalog)
-	local have_changes = false
-	for label = 0, num_labels-1 do
-		if catalog[ci * num_labels + label] then
-			-- Test if there is a label at ci_prev which allows `label` to be
-			-- at ci
-			local label_valid = false
-			for label_prev = 0, num_labels-1 do
-				if catalog[ci_prev * num_labels + label_prev] then
-					if test_adjacency(label_prev, label) then
-						label_valid = true
-						break
-					end
+local Catalog = {}
+setmetatable(Catalog, {__call = function(_, width, height, length, modelinfo)
+	local obj = {
+		w = width,
+		h = height,
+		l = length,
+		wh = width * height,
+		num_labels = modelinfo.num_labels,
+	}
+	local adjacencies = modelinfo.adjacencies
+	local strides = {x = 1, y = obj.w, z = obj.wh}
+	-- The adjacency matrices for the various strides
+	obj.stride_to_adjacencies = {
+		[strides.x] = adjacencies.x,
+		[-strides.x] = adjacencies.x,
+		[strides.y] = adjacencies.y,
+		[-strides.y] = adjacencies.y,
+		[strides.z] = adjacencies.z,
+		[-strides.z] = adjacencies.z
+	}
+	obj.all_strides = {strides.x, -strides.x, strides.y, -strides.y, strides.z,
+		-strides.z}
+
+	setmetatable(obj, Catalog)
+	return obj
+end})
+Catalog.__index = {
+	pos_index = function(self, x, y, z)
+		return z * self.wh + y * self.w + x
+	end,
+
+	label_allowed = function(self, ci, label)
+		return self[ci * self.num_labels + label]
+	end,
+
+	-- Returns an iterator over the current domain of the variable at ci
+	iter_label_alloweds = function(self, ci)
+		local l = -1
+		local l_max = self.num_labels-1
+		return function()
+			for newl = l+1, l_max do
+				if self:label_allowed(ci, newl) then
+					l = newl
+					return l
 				end
 			end
-			-- Remove the label from the catalog if it is not allowed
-			if not label_valid then
-				catalog[ci * num_labels + label] = nil
-				have_changes = true
+			-- return nil
+		end
+	end,
+
+	get_strides = function(self)
+		-- The strides represent the direction, e.g. +X, -X
+		return self.all_strides
+	end,
+
+	-- Returns a function which tests if two labels can be adjacent
+	-- in the direction of a specified stride
+	get_adjacency_tester = function(self, stride)
+		local adjacencies = self.stride_to_adjacencies[stride]
+		local num_labels = self.num_labels
+		if stride < 0 then
+			-- Negative direction
+			return function(label2, label1)
+				return adjacencies[num_labels * label1 + label2]
 			end
+		else
+			return function(label1, label2)
+				return adjacencies[num_labels * label1 + label2]
+			end
+		end
+	end,
+
+	-- Returns a random label from all remaining possible labels at ci
+	-- and removes all other labels at ci
+	choose_random_label = function(self, ci)
+		local possible_labels = {}
+		for label in self:iter_label_alloweds(ci) do
+			possible_labels[#possible_labels+1] = label
+		end
+		if #possible_labels == 0 then
+			return
+		end
+		local chosen_label = possible_labels[math.random(#possible_labels)]
+		for i = 1, #possible_labels do
+			local label = possible_labels[i]
+			if label ~= chosen_label then
+				self:remove_label(ci, label)
+			end
+		end
+		return chosen_label
+	end,
+
+	remove_label = function(self, ci, label)
+		self[ci * self.num_labels + label] = 0
+	end,
+
+	remove_label_at = function(self, x, y, z, label)
+		self:remove_label(self:pos_index(x,y,z), label)
+	end,
+
+	-- Add all labels to all positions in the catalog
+	init_full = function(self)
+		for i = 0, self.w * self.h * self.l * self.num_labels - 1 do
+			self[i] = true
+		end
+	end,
+}
+
+-- Removes invalid labels from a single catalog entry,
+-- returns false if nothing has changed
+local function remove_invalid_labels(ci_prev, ci, test_adjacency,
+		catalog)
+	local have_changes = false
+	for label in catalog:iter_label_alloweds(ci) do
+		-- Test if there is a label at ci_prev which allows `label` to be
+		-- at ci
+		local label_valid = false
+		for label_prev in catalog:iter_label_alloweds(ci_prev) do
+			if test_adjacency(label_prev, label) then
+				label_valid = true
+				break
+			end
+		end
+		-- Remove the label from the catalog if it is not allowed
+		if not label_valid then
+			catalog:remove_label(ci, label)
+			have_changes = true
 		end
 	end
 	return have_changes
 end
 
 -- An implementation of Arc Consistency
-local function apply_neighbour_constraints(constraints, catalog_strides,
-		num_labels, catalog, arcs_queue)
-	-- The strides represent the direction, e.g. +X, -X
-	local strides = {catalog_strides.x, -catalog_strides.x, catalog_strides.y,
-		-catalog_strides.y, catalog_strides.z, -catalog_strides.z}
-	-- The adjacency matrices for the various strides
-	local stride_to_adjacencies = {
-		[catalog_strides.x] = constraints.x,
-		[-catalog_strides.x] = constraints.x,
-		[catalog_strides.y] = constraints.y,
-		[-catalog_strides.y] = constraints.y,
-		[catalog_strides.z] = constraints.z,
-		[-catalog_strides.z] = constraints.z
-	}
+local function apply_neighbour_constraints(catalog, arcs_queue)
+	local strides = catalog:get_strides()
 	while not arcs_queue:is_empty() do
 		local arc = arcs_queue:take()
 		local ci_prev = arc[1]
 		local stride = arc[2]
 		local ci = ci_prev + stride
-		local adjacencies = stride_to_adjacencies[stride]
-		local test_adjacency
-		if stride < 0 then
-			-- Negative direction
-			function test_adjacency(label1, label2)
-				return can_neighbour(adjacencies, label2, label1, num_labels)
-			end
-		else
-			function test_adjacency(label1, label2)
-				return can_neighbour(adjacencies, label1, label2, num_labels)
-			end
-		end
-		if remove_invalid_labels(ci_prev, ci, test_adjacency, num_labels,
+		local test_adjacency = catalog:get_adjacency_tester(stride)
+		if remove_invalid_labels(ci_prev, ci, test_adjacency,
 				catalog) then
 			-- FIXME: this resembles Flood Fill, there may be a faster algorithm
 			-- Labels were removed, so continue with neighbours of ci
@@ -239,32 +315,23 @@ local function generate_chunk(modelinfo, index_model, region, model)
 	local wc = p2[1] - p1[1] + 1 + 2
 	local hc = p2[2] - p1[2] + 1 + 2
 	local lc = p2[3] - p1[3] + 1 + 2
-	local function index_catalog(x, y, z, label)
-		local ci = vector_index(x, y, z, wc, hc * wc)
-		return ci * num_labels + label
-	end
 	local function index_model_off(cx, cy, cz)
 		return index_model(p1[1]-1 + cx, p1[2]-1 + cy, p1[3]-1 + cz)
 	end
 	-- Initialize catalog
-	local catalog = {}
-	-- Add all labels to all positions in the catalog
-	for i = 0, wc * hc * lc - 1 do
-		for label = 0, num_labels-1 do
-			catalog[i * num_labels + label] = true
-		end
-	end
+	local catalog = Catalog(wc, hc, lc, modelinfo)
+	catalog:init_full()
 	-- Remove labels from the border, where the model is fixed
 	-- FIXME: this can be done more efficiently
-	for cz = 0, lc do
-		for cy = 0, hc do
-			for cx = 0, wc do
+	for cz = 0, lc-1 do
+		for cy = 0, hc-1 do
+			for cx = 0, wc-1 do
 				if (cz == 0 or cz == lc-1) or (cy == 0 or cy == hc-1)
 						or (cx == 0 or cx == wc-1) then
 					local fixed_label = model[index_model_off(cx, cy, cz)]
 					for label = 0, num_labels-1 do
 						if label ~= fixed_label then
-							catalog[index_catalog(cx, cy, cz, label)] = nil
+							catalog:remove_label_at(cx, cy, cz, label)
 						end
 					end
 				end
@@ -272,8 +339,7 @@ local function generate_chunk(modelinfo, index_model, region, model)
 		end
 	end
 	-- The preprocessing step: remove invalid labels from the catalog
-	local constraints = modelinfo.adjacencies
-	local catalog_strides = {x = 1, y = wc, z = hc * wc}
+	local catalog_strides = catalog:get_strides()
 	local arcs = {}
 	local num_arcs = 0
 	-- Arcs to the border of the catalog don't need to be added
@@ -284,20 +350,17 @@ local function generate_chunk(modelinfo, index_model, region, model)
 				-- FIXME: actually only arcs from the border to the inside are
 				-- needed
 				local ci = vector_index(cx, cy, cz, wc, hc * wc)
-				arcs[num_arcs+1] = {ci - catalog_strides.x, catalog_strides.x}
-				arcs[num_arcs+2] = {ci + catalog_strides.x, -catalog_strides.x}
-				arcs[num_arcs+3] = {ci - catalog_strides.y, catalog_strides.y}
-				arcs[num_arcs+4] = {ci + catalog_strides.y, -catalog_strides.y}
-				arcs[num_arcs+5] = {ci - catalog_strides.z, catalog_strides.z}
-				arcs[num_arcs+6] = {ci + catalog_strides.z, -catalog_strides.z}
-				num_arcs = num_arcs + 6
+				for i = 1,#catalog_strides do
+					local stride = catalog_strides[i]
+					arcs[num_arcs+1] = {ci - stride, stride}
+					num_arcs = num_arcs + 1
+				end
 			end
 		end
 	end
 	local arcs_queue = datastructures.create_queue{input = arcs}
 	-- Here the catalog should have at least one label for each position
-	apply_neighbour_constraints(constraints, catalog_strides, num_labels,
-		catalog, arcs_queue)
+	apply_neighbour_constraints(catalog, arcs_queue)
 
 	-- Do the Discrete Model Synthesis in the region
 	for z = 1, lc-2 do
@@ -307,13 +370,8 @@ local function generate_chunk(modelinfo, index_model, region, model)
 			-- Index for the catalog
 			local ci = vector_index(1, y, z, wc, hc * wc)
 			for x = 1, wc-2 do
-				local possible_labels = {}
-				for label = 0, num_labels-1 do
-					if catalog[ci * num_labels + label] then
-						possible_labels[#possible_labels+1] = label
-					end
-				end
-				if #possible_labels == 0 then
+				local chosen_label = catalog:choose_random_label(ci)
+				if not chosen_label then
 					-- It failed, so reset the model to its backup
 					local backup_i = 1
 					for z = p1[3], p2[3] do
@@ -329,26 +387,15 @@ local function generate_chunk(modelinfo, index_model, region, model)
 					return false
 				end
 
-				local chosen_label = possible_labels[
-					math.random(#possible_labels)]
 				model[mi] = chosen_label
-				for i = 1, #possible_labels do
-					local label = possible_labels[i]
-					if label ~= chosen_label then
-						catalog[ci * num_labels + label] = nil
-					end
-				end
 
 				-- Remove labels which became invalid because a label has been
 				-- chosen for position ci
-				local strides = {catalog_strides.x, -catalog_strides.x,
-					catalog_strides.y, -catalog_strides.y, catalog_strides.z,
-					-catalog_strides.z}
+				local strides = catalog:get_strides()
 				for i = 1,#strides do
 					arcs_queue:add{ci, strides[i]}
 				end
-				apply_neighbour_constraints(constraints, catalog_strides,
-					num_labels, catalog, arcs_queue)
+				apply_neighbour_constraints(catalog, arcs_queue)
 
 				mi = mi+1
 				ci = ci+1
