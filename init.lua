@@ -502,8 +502,26 @@ local version_head = "modelsynth_v0\n"
 
 -- Serialize the table to a string to save it on disk
 local function encode_modelinfo(modelinfo)
+	-- Shallow copy
+	local output = {}
+	for k,v in pairs(modelinfo) do
+		output[k] = v
+	end
+
+	-- Convert adjacencies to a list for more compact serialization
+	output.adjacencies = nil
+	local adj_lists = {}
+	for dir, adjacencies in pairs(modelinfo.adjacencies) do
+		local list = {}
+		for label in pairs(adjacencies) do
+			list[#list+1] = label
+		end
+		adj_lists[dir] = list
+	end
+	output.adjacencies_lists = adj_lists
+
 	return version_head ..
-		minetest.serialize(modelinfo)
+		minetest.serialize(output)
 end
 
 -- Used when loading a modelinfo from disk
@@ -511,7 +529,26 @@ local function decode_modelinfo(data)
 	if data:sub(1, #version_head) ~= version_head then
 		return nil, "invalid version"
 	end
-	return minetest.deserialize(data:sub(#version_head+1))
+	data = minetest.deserialize(data:sub(#version_head+1))
+
+	-- Shallow copy
+	local modelinfo = {}
+	for k,v in pairs(data) do
+		modelinfo[k] = v
+	end
+
+	modelinfo.adjacencies_lists = nil
+	local adjacencies = {}
+	for dir, list in pairs(data.adjacencies_lists) do
+		local adjs = {}
+		for i = 1,#list do
+			adjs[list[i]] = true
+		end
+		adjacencies[dir] = adjs
+	end
+	modelinfo.adjacencies = adjacencies
+
+	return modelinfo
 end
 
 worldedit.register_command("gen_mi", {
