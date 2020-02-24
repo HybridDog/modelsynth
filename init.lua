@@ -486,7 +486,7 @@ local function generate_model(pos1, pos2, modelinfo)
 	-- Generate the model
 	-- Use bigger width and height for the boundary conditions
 	local wo = w + 2
-	local ho = h + 2
+	local ho = h / 3 + 2
 	local lo = l + 2
 	local model = Model(wo, ho, lo, modelinfo)
 	-- Fill everything with empty space
