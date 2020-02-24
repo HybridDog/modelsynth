@@ -15,10 +15,6 @@ local function get_label_key(data)
 	--~ return table.concat(data, ",")
 end
 
-local function vector_index(x, y, z, ystride, zstride)
-	return z * zstride + y * ystride + x
-end
-
 local function generate_modelinfo(pos1, pos2)
 	-- Labels are model pieces, indices start from zero
 	local labels = {}
@@ -246,6 +242,71 @@ Catalog.__index = {
 	end,
 }
 
+local Model = {}
+setmetatable(Model, {__call = function(_, width, height, length, modelinfo)
+	local obj = {
+		w = width,
+		h = height,
+		l = length,
+		wh = width * height,
+		empty_space = modelinfo.special_labels.empty_space,
+		--~ modelinfo = modelinfo,
+	}
+
+	setmetatable(obj, Model)
+	return obj
+
+end})
+Model.__index = {
+	index = function(self, x, y, z)
+		return z * self.wh + y * self.w + x
+	end,
+
+	get_backup = function(self, p1, p2)
+		-- Save the current model in the region for the failure case
+		-- Only the area defined by p1 and p2 is relevant
+		local model_backup = {true}
+		local bi = 0
+		for z = p1[3], p2[3] do
+			for y = p1[2], p2[2] do
+				local mi = self:index(p1[1], y, z)
+				for x = p1[1], p2[1] do
+					model_backup[bi] = self[mi]
+					mi = mi+1
+					bi = bi+1
+				end
+			end
+		end
+		model_backup.p1 = p1
+		model_backup.p2 = p2
+		return model_backup
+	end,
+
+	-- Fills the whole model with empty space, which makes it fulfill the
+	-- adjacency constraints trivially
+	fill_empty = function(self)
+		for i = 0, self.wh * self.l - 1 do
+			self[i] = self.empty_space
+		end
+	end,
+
+	apply_backup = function(self, model_backup)
+		local p1 = model_backup.p1
+		local p2 = model_backup.p2
+		local bi = 0
+		for z = p1[3], p2[3] do
+			for y = p1[2], p2[2] do
+				local mi = self:index(p1[1], y, z)
+				for x = p1[1], p2[1] do
+					self[mi] = model_backup[bi]
+					bi = bi+1
+					mi = mi+1
+				end
+			end
+		end
+	end,
+}
+
 -- Removes invalid labels from a single catalog entry,
 -- returns false if nothing has changed
 local function remove_invalid_labels(ci_prev, ci, test_adjacency,
@@ -300,28 +361,21 @@ local function get_index_function(ystride, zstride)
 end
 
 -- Returns false if it fails
-local function generate_chunk(modelinfo, index_model, region, model)
+local function generate_chunk(modelinfo, region, model)
 	local num_labels = modelinfo.num_labels
 	-- Start and end positions in the region
 	local p1 = region[1]
 	local p2 = region[2]
 	-- Save the current model in the region for the failure case
-	local model_backup = {}
-	for z = p1[3], p2[3] do
-		for y = p1[2], p2[2] do
-			local mi = index_model(p1[1], y, z)
-			for x = p1[1], p2[1] do
-				model_backup[#model_backup+1] = model[mi]
-				mi = mi+1
-			end
-		end
-	end
+	local model_backup = model:get_backup(p1, p2)
 	-- The catalog needs to be 1 bigger than the region in all directions
 	local wc = p2[1] - p1[1] + 1 + 2
 	local hc = p2[2] - p1[2] + 1 + 2
 	local lc = p2[3] - p1[3] + 1 + 2
+	-- This function indices the model with a position in the catalog
+	-- (it needs to be translated)
 	local function index_model_off(cx, cy, cz)
-		return index_model(p1[1]-1 + cx, p1[2]-1 + cy, p1[3]-1 + cz)
+		return model:index(p1[1]-1 + cx, p1[2]-1 + cy, p1[3]-1 + cz)
 	end
 	-- Initialize catalog
 	local catalog = Catalog(wc, hc, lc, modelinfo)
@@ -351,14 +405,25 @@ local function generate_chunk(modelinfo, index_model, region, model)
 	for cz = 1, lc - 2 do
 		for cy = 1, hc - 2 do
 			for cx = 1, wc - 2 do
-				-- Add arcs from all possible neighbours
-				-- FIXME: actually only arcs from the border to the inside are
-				-- needed
-				local ci = vector_index(cx, cy, cz, wc, hc * wc)
-				for i = 1,#catalog_strides do
-					local stride = catalog_strides[i]
-					arcs[num_arcs+1] = {ci - stride, stride}
-					num_arcs = num_arcs + 1
+				-- Add arcs only from the border to the inside
+				if cz == 1 or cy == 1 or cx == 1 then
+					local ci = catalog:pos_index(cx, cy, cz)
+					for i = 1,#catalog_strides do
+						local stride = catalog_strides[i]
+						if stride > 0 then
+							arcs[num_arcs+1] = {ci - stride, stride}
+							num_arcs = num_arcs + 1
+						end
+					end
+				elseif cz == lc - 2 or cy == hc - 2 or cx == wc - 2 then
+					local ci = catalog:pos_index(cx, cy, cz)
+					for i = 1,#catalog_strides do
+						local stride = catalog_strides[i]
+						if stride < 0 then
+							arcs[num_arcs+1] = {ci - stride, stride}
+							num_arcs = num_arcs + 1
+						end
+					end
 				end
 			end
 		end
@@ -373,22 +438,12 @@ local function generate_chunk(modelinfo, index_model, region, model)
 			-- Index for the model
 			local mi = index_model_off(1, y, z)
 			-- Index for the catalog
-			local ci = vector_index(1, y, z, wc, hc * wc)
+			local ci = catalog:pos_index(1, y, z)
 			for x = 1, wc-2 do
 				local chosen_label = catalog:choose_random_label(ci)
 				if not chosen_label then
 					-- It failed, so reset the model to its backup
-					local backup_i = 1
-					for z = p1[3], p2[3] do
-						for y = p1[2], p2[2] do
-							local mi = index_model(p1[1], y, z)
-							for x = p1[1], p2[1] do
-								model[mi] = model_backup[backup_i]
-								backup_i = backup_i+1
-								mi = mi+1
-							end
-						end
-					end
+					model:apply_backup(model_backup)
 					return false
 				end
 
@@ -433,12 +488,9 @@ local function generate_model(pos1, pos2, modelinfo)
 	local wo = w + 2
 	local ho = h + 2
 	local lo = l + 2
-	local model = {}
+	local model = Model(wo, ho, lo, modelinfo)
 	-- Fill everything with empty space
-	local empty_space = modelinfo.special_labels.empty_space
-	for i = 0, wo * ho * lo - 1 do
-		model[i] = empty_space
-	end
+	model:fill_empty()
 	-- Subdivide the to-be-generated model into overlapping smaller regions
 	local regions = datastructures.create_queue()
 	local region_size_max = 2 * 16
@@ -456,13 +508,11 @@ local function generate_model(pos1, pos2, modelinfo)
 		end
 	end
 	assert(not regions:is_empty())
-	-- Function which returns an index in the model array
-	local index_model = get_index_function(wo, ho * wo)
 	-- Generate in each region, add more regions if it failed
 	repeat
 		local region = regions:take()
 		log("Trying to generate region " .. dump_region(region))
-		if not generate_chunk(modelinfo, index_model, region, model) then
+		if not generate_chunk(modelinfo, region, model) then
 			log("Failed, subdividing…")
 			-- It failed, so subdivide the region
 			local p1 = region[1]
@@ -513,7 +563,7 @@ local function generate_model(pos1, pos2, modelinfo)
 		old_to_new_contentid[i] = minetest.get_content_id(nodename)
 	end
 	local labels_nodes = {}
-	for i = 0, num_labels do
+	for i = 0, modelinfo.num_labels-1 do
 		local label = modelinfo.labels[i]
 		labels_nodes[i] = {old_to_new_contentid[label[1]],
 			old_to_new_contentid[label[2]], old_to_new_contentid[label[3]]}
@@ -521,14 +571,14 @@ local function generate_model(pos1, pos2, modelinfo)
 
 	for z = 1, lo-2 do
 		for y = 1, ho-2 do
-			local mi = index_model(1, y, z)
+			local mi = model:index(1, y, z)
 			local vi = area:index(pos1.x, pos1.y + (y - 1) * 3, pos1.z + z - 1)
 			for x = 1, wo-2 do
+				-- Place the content of the label
 				local label_nodes = labels_nodes[model[mi]]
 				nodes[vi] = label_nodes[1]
 				nodes[vi + area.ystride] = label_nodes[2]
 				nodes[vi + 2 * area.ystride] = label_nodes[3]
-				old_to_new_contentid[i]
 				mi = mi+1
 				vi = vi+1
 			end
