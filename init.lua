@@ -135,17 +135,22 @@ end
 
 local Catalog = {}
 setmetatable(Catalog, {__call = function(_, width, height, length, modelinfo)
+	local num_labels = modelinfo.num_labels
 	local obj = {
 		w = width,
 		h = height,
 		l = length,
 		wh = width * height,
-		num_labels = modelinfo.num_labels,
+		num_labels = num_labels,
 	}
 	local adjacencies = modelinfo.adjacencies
 	local strides = {x = 1, y = obj.w, z = obj.wh}
+	obj.all_strides = {strides.x, -strides.x, strides.y, -strides.y, strides.z,
+		-strides.z}
+
+	local adjacency_testers = {}
 	-- The adjacency matrices for the various strides
-	obj.stride_to_adjacencies = {
+	local stride_to_adjacencies = {
 		[strides.x] = adjacencies.x,
 		[-strides.x] = adjacencies.x,
 		[strides.y] = adjacencies.y,
@@ -153,8 +158,19 @@ setmetatable(Catalog, {__call = function(_, width, height, length, modelinfo)
 		[strides.z] = adjacencies.z,
 		[-strides.z] = adjacencies.z
 	}
-	obj.all_strides = {strides.x, -strides.x, strides.y, -strides.y, strides.z,
-		-strides.z}
+	for stride, adjacencies in pairs(stride_to_adjacencies) do
+		if stride < 0 then
+			-- Negative direction
+			adjacency_testers[stride] = function(label2, label1)
+				return adjacencies[num_labels * label1 + label2]
+			end
+		else
+			adjacency_testers[stride] = function(label1, label2)
+				return adjacencies[num_labels * label1 + label2]
+			end
+		end
+	end
+	obj.adjacency_testers = adjacency_testers
 
 	setmetatable(obj, Catalog)
 	return obj
@@ -191,18 +207,7 @@ Catalog.__index = {
 	-- Returns a function which tests if two labels can be adjacent
 	-- in the direction of a specified stride
 	get_adjacency_tester = function(self, stride)
-		local adjacencies = self.stride_to_adjacencies[stride]
-		local num_labels = self.num_labels
-		if stride < 0 then
-			-- Negative direction
-			return function(label2, label1)
-				return adjacencies[num_labels * label1 + label2]
-			end
-		else
-			return function(label1, label2)
-				return adjacencies[num_labels * label1 + label2]
-			end
-		end
+		return self.adjacency_testers[stride]
 	end,
 
 	-- Returns a random label from all remaining possible labels at ci
