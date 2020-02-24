@@ -495,7 +495,43 @@ local function generate_model(pos1, pos2, modelinfo)
 			end
 		end
 	until regions:is_empty()
-	-- TODO: put nodes!
+
+	-- Put the nodes
+	local vm = minetest.get_voxel_manip()
+	local e1, e2 = vm:read_from_map(pos1, pos2)
+	local area = VoxelArea:new{MinEdge=e1, MaxEdge=e2}
+	local nodes = vm:get_data()
+
+	-- Prepare model pieces (labels)
+	local old_to_new_contentid = {}
+	for i, nodename in pairs(modelinfo.nodeids) do
+		old_to_new_contentid[i] = minetest.get_content_id(nodename)
+	end
+	local labels_nodes = {}
+	for i = 0, num_labels do
+		local label = modelinfo.labels[i]
+		labels_nodes[i] = {old_to_new_contentid[label[1]],
+			old_to_new_contentid[label[2]], old_to_new_contentid[label[3]]}
+	end
+
+	for z = 1, lo-2 do
+		for y = 1, ho-2 do
+			local mi = index_model(1, y, z)
+			local vi = area:index(pos1.x, pos1.y + (y - 1) * 3, pos1.z + z - 1)
+			for x = 1, wo-2 do
+				local label_nodes = labels_nodes[model[mi]]
+				nodes[vi] = label_nodes[1]
+				nodes[vi + area.ystride] = label_nodes[2]
+				nodes[vi + 2 * area.ystride] = label_nodes[3]
+				old_to_new_contentid[i]
+				mi = mi+1
+				vi = vi+1
+			end
+		end
+	end
+
+	vm:set_data(nodes)
+	vm:write_to_map()
 end
 
 local version_head = "modelsynth_v0\n"
