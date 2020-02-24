@@ -475,13 +475,13 @@ end
 
 local function generate_model(pos1, pos2, modelinfo)
 	assert(type(modelinfo) == "table", "invalid modelinfo argument")
-	local w = pos2.x - pos1.x
-	local h = pos2.y - pos1.y
+	local w = pos2.x - pos1.x + 1
+	local h = pos2.y - pos1.y + 1
 	if h % 3 > 0 then
 		minetest.log("warning", "Height is not a multiple of 3")
 		h = h - h % 3
 	end
-	local l = pos2.z - pos1.z
+	local l = pos2.z - pos1.z + 1
 
 	-- Generate the model
 	-- Use bigger width and height for the boundary conditions
@@ -489,6 +489,7 @@ local function generate_model(pos1, pos2, modelinfo)
 	local ho = h / 3 + 2
 	local lo = l + 2
 	local model = Model(wo, ho, lo, modelinfo)
+	log("Model size: " .. wo .. "x" .. ho .. "(*3)x" .. lo)
 	-- Fill everything with empty space
 	model:fill_empty()
 	-- Subdivide the to-be-generated model into overlapping smaller regions
@@ -499,9 +500,9 @@ local function generate_model(pos1, pos2, modelinfo)
 			for x = 1, wo-2, region_size_max / 2 do
 				local p1 = {x, y, z}
 				local p2 = {
-					math.max(x + region_size_max-1, wo-2),
-					math.max(y + region_size_max-1, ho-2),
-					math.max(z + region_size_max-1, lo-2),
+					math.min(x + region_size_max-1, wo-2),
+					math.min(y + region_size_max-1, ho-2),
+					math.min(z + region_size_max-1, lo-2),
 				}
 				regions:add{p1, p2}
 			end
@@ -714,3 +715,4 @@ worldedit.register_command("synth", {
 	end,
 })
 
+-- TODO: maybe use AC2001?
