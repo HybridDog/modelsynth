@@ -227,7 +227,7 @@ Catalog.__index = {
 	end,
 
 	remove_label = function(self, ci, label)
-		self[ci * self.num_labels + label] = 0
+		self[ci * self.num_labels + label] = nil
 	end,
 
 	remove_label_at = function(self, x, y, z, label)
@@ -346,17 +346,12 @@ local function apply_neighbour_constraints(catalog, arcs_queue)
 			-- Labels were removed, so continue with neighbours of ci
 			for i = 1,#strides do
 				local next_stride = strides[i]
-				if next_stride ~= stride then
+				-- Do not go back
+				if next_stride ~= -stride then
 					arcs_queue:add{ci, next_stride}
 				end
 			end
 		end
-	end
-end
-
-local function get_index_function(ystride, zstride)
-	return function(x, y, z)
-		return z * zstride + y * ystride + x
 	end
 end
 
@@ -679,6 +674,25 @@ worldedit.register_command("gen_mi", {
 	end,
 })
 
+local function print_modelinfo(modelinfo)
+	print(dump(modelinfo))
+	print("Labels:")
+	local ids = modelinfo.nodeids
+	for i = 0, modelinfo.num_labels-1 do
+		local l = modelinfo.labels[i]
+		print(("%d: %s, %s, %s"):format(i, ids[l[1]], ids[l[2]], ids[l[3]]))
+	end
+	print("Adjacencies:")
+	for dir, t in pairs(modelinfo.adjacencies) do
+		print("Direction " .. dir .. ":")
+		for k in pairs(t) do
+			local label1 = math.floor(k / modelinfo.num_labels)
+			local label2 = k % modelinfo.num_labels
+			print(("%d - %d"):format(label1, label2))
+		end
+	end
+end
+
 worldedit.register_command("synth", {
 	params = "filename",
 	description = "[modelsynth] Synthesize a model from the model " ..
@@ -708,6 +722,7 @@ worldedit.register_command("synth", {
 			minetest.chat_send_player(playername, "Cannot load modelinfo: " ..
 				errormsg)
 		end
+		--~ print_modelinfo(modelinfo)
 
 		generate_model(pos1, pos2, modelinfo)
 
