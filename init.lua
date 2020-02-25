@@ -507,9 +507,9 @@ local function generate_model(pos1, pos2, modelinfo)
 	-- Generate in each region, add more regions if it failed
 	repeat
 		local region = regions:take()
-		log("Trying to generate region " .. dump_region(region))
+		--~ log("Trying to generate region " .. dump_region(region))
 		if not generate_chunk(modelinfo, region, model) then
-			log("Failed, subdividing…")
+			--~ log("Failed, subdividing…")
 			-- It failed, so subdivide the region
 			local p1 = region[1]
 			local p2 = region[2]
@@ -538,7 +538,7 @@ local function generate_model(pos1, pos2, modelinfo)
 				end
 			end
 			if #new_regions > 1 then
-				log("New regions:")
+				--~ log("New regions:")
 				for i = 1,#new_regions do
 					regions:add(new_regions[i])
 					log(dump_region(new_regions[i]))
