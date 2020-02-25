@@ -11,8 +11,63 @@ local function log(msg)
 end
 
 local function get_label_key(data)
-	return data[1] .. "," .. data[2] .. "," .. data[3]
-	--~ return table.concat(data, ",")
+	return table.concat(data, ",")
+end
+
+-- Designed for 2x3x2 sized model pieces
+local function get_model_size(pos1, pos2)
+	local s = vector.add(vector.subtract(pos2, pos1), 1)
+	return math.floor(s.x / 2), math.floor(s.y / 3), math.floor(s.z / 2)
+end
+
+-- Returns VoxelArea offsets for index offsets within a label and offsets to
+-- move to the start of the next label
+local function get_label_strides(area)
+	local offsets = {}
+	-- Order by y first
+	for y = 0, 2 do
+		for z = 0, 1 do
+			for x = 0,1 do
+				offsets[#offsets+1] = z * area.zstride + y * area.ystride + x
+			end
+		end
+	end
+	local label_skip_offsets = {x = 2, y = 3 * area.ystride,
+		z = 2 * area.zstride}
+	return offsets, label_skip_offsets
+end
+
+local function get_empty_label(label_indices)
+	-- This code is not flexible, but air almost always represents empty space.
+	local airid = minetest.get_content_id"air"
+	local label_air = {}
+	for i = 1, 2*3*2 do
+		label_air[i] = airid
+	end
+	local k = get_label_key(label_air)
+	local air_label_id = label_indices[k]
+	if not air_label_id then
+		minetest.log("warning", "No air empty space label found")
+	end
+	return air_label_id
+end
+
+-- Calculates placeable model pieces from the labels
+local function prepare_model_pieces(modelinfo)
+	local old_to_new_contentid = {}
+	for i, nodename in pairs(modelinfo.nodeids) do
+		old_to_new_contentid[i] = minetest.get_content_id(nodename)
+	end
+	local labels_nodes = {}
+	for i = 0, modelinfo.num_labels-1 do
+		local label = modelinfo.labels[i]
+		local newlabel = {}
+		for k = 1, 2*3*2 do
+			newlabel[k] = old_to_new_contentid[label[k]]
+		end
+		labels_nodes[i] = newlabel
+	end
+	return labels_nodes
 end
 
 local function generate_modelinfo(pos1, pos2)
@@ -26,99 +81,83 @@ local function generate_modelinfo(pos1, pos2)
 	local area = VoxelArea:new{MinEdge=e1, MaxEdge=e2}
 	local nodes = vm:get_data()
 
-	-- The 1x3x1 nodes sized labels in the areas
-	local label_maps = {{}, {}, {}}
+	-- Firstly, collect all labels and their positions, i.e. the input model
 
-	-- Collect all labels and their positions
-	for y_off = 0,2 do
-		-- One label map for each offset in the y direction
-		local label_map = label_maps[y_off+1]
-		local y_start = pos1.y + y_off
-		-- Go back two nodes in y direction so that the labels are searched
-		-- only in the area between pos1 and pos2
-		local y_end = pos2.y - 2
-		local li = 0
-		for z = pos1.z, pos2.z do
-			for y = y_start, y_end, 3 do
-				for x = pos1.x, pos2.x do
-					-- The label consists of 1x3x1 nodes
-					local vi_bottom = area:index(x, y, z)
-					local vi_middle = vi_bottom + area.ystride
-					local vi_top = vi_middle + area.ystride
-					local label = {nodes[vi_bottom], nodes[vi_middle],
-						nodes[vi_top]}
-					-- Add the label if it isn't known yet
-					local k = get_label_key(label)
-					local i = label_indices[k]
-					if not i then
-						-- Add this newly found label
-						i = num_labels
-						label_indices[k] = i
-						labels[i] = label
-						num_labels = num_labels+1
-					end
-					label_map[li] = i
-					li = li+1
+	-- The 2x3x2 nodes sized labels in the area
+	local label_map = {}
+
+	local wm, hm, lm = get_model_size(pos1, pos2)
+	local label_strides, label_skips = get_label_strides(area)
+	local li = 0
+	local vi_z = area:indexp(pos1)
+	for z = 0, lm-1 do
+		local vi_yz = vi_z
+		for y = 0, hm-1 do
+			local vi_xyz = vi_yz
+			for x = 0, wm-1 do
+				local label = {}
+				for i = 1,#label_strides do
+					label[#label+1] = nodes[vi_xyz + label_strides[i]]
 				end
+				-- Add the label if it isn't known yet
+				local k = get_label_key(label)
+				local i = label_indices[k]
+				if not i then
+					-- Add this newly found label
+					i = num_labels
+					label_indices[k] = i
+					labels[i] = label
+					num_labels = num_labels+1
+				end
+				label_map[li] = i
+				li = li+1
+				vi_xyz = vi_xyz + label_skips.x
 			end
+			vi_yz = vi_yz + label_skips.y
 		end
+		vi_z = vi_z + label_skips.z
 	end
 
 	-- Find neighbouring constraints
 	local adjacencies = {x = {}, y = {}, z = {}}
-	for y_off = 0,2 do
-		local label_map = label_maps[y_off+1]
-		local y_start = pos1.y + y_off
-		local y_end = pos2.y - 2
-		local label_ystride = pos2.x - pos1.x + 1
-		-- The number of times the for loop along y was executed previously
-		local label_zstride = math.floor((y_end - y_start) / 3) + 1
-		-- One step along z means label_ystride along y
-		label_zstride = label_zstride * label_ystride
-		local li = 0
-		for z = pos1.z, pos2.z-1 do
-			for y = y_start, y_end-3, 3 do
-				for x = pos1.x, pos2.x-1 do
-					-- Only +x, +y, +z transitions are saved because of symmetry
-					local label_current = label_map[li]
-					local label_z = label_map[li + label_zstride]
-					local label_y = label_map[li + label_ystride]
-					local label_x = label_map[li + 1]
-					adjacency_i = label_current * num_labels
-					adjacencies.z[adjacency_i + label_z] = true
-					adjacencies.y[adjacency_i + label_y] = true
-					adjacencies.x[adjacency_i + label_x] = true
-					li = li+1
-				end
-				-- One x is skipped
-				li = li + 1
+	local label_ystride = wm
+	local label_zstride = hm * wm
+	local li = 0
+	for z = 0, lm-2 do
+		for y = 0, hm-2 do
+			for x = 0, wm-2 do
+				-- Only +x, +y, +z transitions are saved because of symmetry
+				local label_current = label_map[li]
+				local label_z = label_map[li + label_zstride]
+				local label_y = label_map[li + label_ystride]
+				local label_x = label_map[li + 1]
+				adjacency_i = label_current * num_labels
+				adjacencies.z[adjacency_i + label_z] = true
+				adjacencies.y[adjacency_i + label_y] = true
+				adjacencies.x[adjacency_i + label_x] = true
+				li = li+1
 			end
-			-- One slice along x is skipped due to the the for loop end
-			li = li + label_ystride
+			-- Skip one x because of the x for loop end
+			li = li + 1
 		end
+		-- Skip a slice along x because of the y for loop end
+		li = li + label_ystride
 	end
 
 	-- Save node names so that the nodes in the labels are not ephemeral
 	local id_to_nodename = {}
-	for k = 0,num_labels-1 do
+	for k = 0, num_labels-1 do
 		local label = labels[k]
-		for j = 1,3 do
+		for j = 1, #label do
 			local nodeid = label[j]
 			id_to_nodename[nodeid] = id_to_nodename[nodeid]
 				or minetest.get_name_from_content_id(nodeid)
 		end
 	end
 
-	-- Find the empty space and other special labels, this code is not yet
-	-- flexible
-	-- They are used for the intial model and boundary conditions
-	local airid = minetest.get_content_id"air"
-	local k = get_label_key{airid, airid, airid}
-	local air_label_id = label_indices[k]
-	if not air_label_id then
-		minetest.log("warning", "No air empty space label found")
-	end
-	special_labels = {empty_space = air_label_id}
+	-- Find the empty space and other special labels.
+	-- I use special labels for the intial model and boundary conditions.
+	special_labels = {empty_space = get_empty_label(label_indices)}
 
 	return {
 		num_labels = num_labels,
@@ -470,34 +509,27 @@ end
 
 local function generate_model(pos1, pos2, modelinfo)
 	assert(type(modelinfo) == "table", "invalid modelinfo argument")
-	local w = pos2.x - pos1.x + 1
-	local h = pos2.y - pos1.y + 1
-	if h % 3 > 0 then
-		minetest.log("warning", "Height is not a multiple of 3")
-		h = h - h % 3
-	end
-	local l = pos2.z - pos1.z + 1
-
 	-- Generate the model
+	local wm, hm, lm = get_model_size(pos1, pos2)
 	-- Use bigger width and height for the boundary conditions
-	local wo = w + 2
-	local ho = h / 3 + 2
-	local lo = l + 2
-	local model = Model(wo, ho, lo, modelinfo)
-	log("Model size: " .. wo .. "x" .. ho .. "(*3)x" .. lo)
+	wm = wm + 2
+	hm = hm + 2
+	lm = lm + 2
+	local model = Model(wm, hm, lm, modelinfo)
+	log("Model size: " .. wm .. "x" .. hm .. "x" .. lm)
 	-- Fill everything with empty space
 	model:fill_empty()
 	-- Subdivide the to-be-generated model into overlapping smaller regions
 	local regions = datastructures.create_queue()
 	local region_size_max = 2 * 16
-	for z = 1, lo-2, region_size_max / 2 do
-		for y = 1, ho-2, region_size_max / 2 do
-			for x = 1, wo-2, region_size_max / 2 do
+	for z = 1, lm-2, region_size_max / 2 do
+		for y = 1, hm-2, region_size_max / 2 do
+			for x = 1, wm-2, region_size_max / 2 do
 				local p1 = {x, y, z}
 				local p2 = {
-					math.min(x + region_size_max-1, wo-2),
-					math.min(y + region_size_max-1, ho-2),
-					math.min(z + region_size_max-1, lo-2),
+					math.min(x + region_size_max-1, wm-2),
+					math.min(y + region_size_max-1, hm-2),
+					math.min(z + region_size_max-1, lm-2),
 				}
 				regions:add{p1, p2}
 			end
@@ -541,7 +573,7 @@ local function generate_model(pos1, pos2, modelinfo)
 				--~ log("New regions:")
 				for i = 1,#new_regions do
 					regions:add(new_regions[i])
-					log(dump_region(new_regions[i]))
+					--~ log(dump_region(new_regions[i]))
 				end
 			end
 		end
@@ -553,30 +585,22 @@ local function generate_model(pos1, pos2, modelinfo)
 	local area = VoxelArea:new{MinEdge=e1, MaxEdge=e2}
 	local nodes = vm:get_data()
 
-	-- Prepare model pieces (labels)
-	local old_to_new_contentid = {}
-	for i, nodename in pairs(modelinfo.nodeids) do
-		old_to_new_contentid[i] = minetest.get_content_id(nodename)
-	end
-	local labels_nodes = {}
-	for i = 0, modelinfo.num_labels-1 do
-		local label = modelinfo.labels[i]
-		labels_nodes[i] = {old_to_new_contentid[label[1]],
-			old_to_new_contentid[label[2]], old_to_new_contentid[label[3]]}
-	end
+	local labels_nodes = prepare_model_pieces(modelinfo)
+	local label_strides, label_skips = get_label_strides(area)
 
-	for z = 1, lo-2 do
-		for y = 1, ho-2 do
+	for z = 1, lm-2 do
+		for y = 1, hm-2 do
 			local mi = model:index(1, y, z)
-			local vi = area:index(pos1.x, pos1.y + (y - 1) * 3, pos1.z + z - 1)
-			for x = 1, wo-2 do
+			local vi = area:index(pos1.x, pos1.y + (y - 1) * label_skips.y,
+				pos1.z + (z - 1) * label_skips.z)
+			for x = 1, wm-2 do
 				-- Place the content of the label
 				local label_nodes = labels_nodes[model[mi]]
-				nodes[vi] = label_nodes[1]
-				nodes[vi + area.ystride] = label_nodes[2]
-				nodes[vi + 2 * area.ystride] = label_nodes[3]
+				for k = 1, #label_skips do
+					nodes[vi + label_skips[k]] = label_nodes[k]
+				end
 				mi = mi+1
-				vi = vi+1
+				vi = vi + label_skips.x
 			end
 		end
 	end
@@ -585,7 +609,7 @@ local function generate_model(pos1, pos2, modelinfo)
 	vm:write_to_map()
 end
 
-local version_head = "modelsynth_v0\n"
+local version_head = "modelsynth_v1\n"
 
 -- Serialize the table to a string to save it on disk
 local function encode_modelinfo(modelinfo)
@@ -730,4 +754,4 @@ worldedit.register_command("synth", {
 	end,
 })
 
--- TODO: maybe use AC2001?
+-- TODO: maybe use AC2001?, 2x3x2 model pieces no offset
