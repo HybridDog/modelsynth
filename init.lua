@@ -539,7 +539,7 @@ local function generate_model(pos1, pos2, modelinfo)
 	-- Generate in each region, add more regions if it failed
 	repeat
 		local region = regions:take()
-		--~ log("Trying to generate region " .. dump_region(region))
+		log("Trying to generate region " .. dump_region(region))
 		if not generate_chunk(modelinfo, region, model) then
 			--~ log("Failed, subdividing…")
 			-- It failed, so subdivide the region
@@ -754,4 +754,5 @@ worldedit.register_command("synth", {
 	end,
 })
 
--- TODO: maybe use AC2001?, 2x3x2 model pieces no offset
+-- TODO: maybe use AC2001?,
+-- it always generates air now…
