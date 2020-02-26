@@ -9,12 +9,21 @@ local function log(msg)
 	print(msg)
 	minetest.chat_send_all(msg)
 end
+local function log_debug(msg)
+	log(msg)
+end
+-- I've commented log_verbose calls to avoid redundant string generation;
+-- unfortunately there's no #ifdef in lua.
+local function log_verbose(msg)
+	log_debug(msg)
+end
 
 local function get_label_key(data)
 	return table.concat(data, ",")
 end
 
--- Designed for 2x3x2 sized model pieces
+-- Designed for 2x3x2 sized model pieces; the entire model must fit into the
+-- area defined by pos1 and pos2
 local function get_model_size(pos1, pos2)
 	local s = vector.add(vector.subtract(pos2, pos1), 1)
 	return math.floor(s.x / 2), math.floor(s.y / 3), math.floor(s.z / 2)
@@ -89,15 +98,14 @@ local function generate_modelinfo(pos1, pos2)
 	local wm, hm, lm = get_model_size(pos1, pos2)
 	local label_strides, label_skips = get_label_strides(area)
 	local li = 0
-	local vi_z = area:indexp(pos1)
+	local vi_start = area:indexp(pos1)
 	for z = 0, lm-1 do
-		local vi_yz = vi_z
 		for y = 0, hm-1 do
-			local vi_xyz = vi_yz
+			local vi = vi_start + z * label_skips.z + y * label_skips.y
 			for x = 0, wm-1 do
 				local label = {}
 				for i = 1,#label_strides do
-					label[#label+1] = nodes[vi_xyz + label_strides[i]]
+					label[#label+1] = nodes[vi + label_strides[i]]
 				end
 				-- Add the label if it isn't known yet
 				local k = get_label_key(label)
@@ -111,11 +119,9 @@ local function generate_modelinfo(pos1, pos2)
 				end
 				label_map[li] = i
 				li = li+1
-				vi_xyz = vi_xyz + label_skips.x
+				vi = vi + label_skips.x
 			end
-			vi_yz = vi_yz + label_skips.y
 		end
-		vi_z = vi_z + label_skips.z
 	end
 
 	-- Find neighbouring constraints
@@ -217,6 +223,16 @@ Catalog.__index = {
 
 	label_allowed = function(self, ci, label)
 		return self[ci * self.num_labels + label]
+	end,
+
+	-- Returns true iff at least one label is allowed at ci
+	some_label_allowed = function(self, ci)
+		for l = 0, self.num_labels-1 do
+			if self:label_allowed(ci, l) then
+				return true
+			end
+		end
+		return false
 	end,
 
 	-- Returns an iterator over the current domain of the variable at ci
@@ -463,8 +479,12 @@ local function generate_chunk(modelinfo, region, model)
 		end
 	end
 	local arcs_queue = datastructures.create_queue{input = arcs}
-	-- Here the catalog should have at least one label for each position
 	apply_neighbour_constraints(catalog, arcs_queue)
+	-- Here the catalog should have at least one label for each position
+	if not catalog:some_label_allowed(catalog:pos_index(1, 1, 1)) then
+		log("Error: No label allowed")
+		return false
+	end
 
 	-- Do the Discrete Model Synthesis in the region
 	for z = 1, lc-2 do
@@ -535,13 +555,16 @@ local function generate_model(pos1, pos2, modelinfo)
 			end
 		end
 	end
-	assert(not regions:is_empty())
+	if regions:is_empty() then
+		log("Error: no regions")
+	end
 	-- Generate in each region, add more regions if it failed
 	repeat
 		local region = regions:take()
-		log("Trying to generate region " .. dump_region(region))
+		--~ log_verbose("Trying to generate region " .. dump_region(region))
 		if not generate_chunk(modelinfo, region, model) then
-			--~ log("Failed, subdividing…")
+			--~ log_verbose("Failed to generate " .. dump_region(region) ..
+				--~ ", subdividing…")
 			-- It failed, so subdivide the region
 			local p1 = region[1]
 			local p2 = region[2]
@@ -570,16 +593,16 @@ local function generate_model(pos1, pos2, modelinfo)
 				end
 			end
 			if #new_regions > 1 then
-				--~ log("New regions:")
+				--~ log_verbose("New regions:")
 				for i = 1,#new_regions do
 					regions:add(new_regions[i])
-					--~ log(dump_region(new_regions[i]))
+					--~ log_verbose(dump_region(new_regions[i]))
 				end
 			end
 		end
 	until regions:is_empty()
 
-	-- Put the nodes
+	log_debug("Putting the nodes…")
 	local vm = minetest.get_voxel_manip()
 	local e1, e2 = vm:read_from_map(pos1, pos2)
 	local area = VoxelArea:new{MinEdge=e1, MaxEdge=e2}
@@ -588,16 +611,17 @@ local function generate_model(pos1, pos2, modelinfo)
 	local labels_nodes = prepare_model_pieces(modelinfo)
 	local label_strides, label_skips = get_label_strides(area)
 
+	local vi_start = area:indexp(pos1)
 	for z = 1, lm-2 do
 		for y = 1, hm-2 do
 			local mi = model:index(1, y, z)
-			local vi = area:index(pos1.x, pos1.y + (y - 1) * label_skips.y,
-				pos1.z + (z - 1) * label_skips.z)
+			local vi = vi_start + (z - 1) * label_skips.z
+				+ (y - 1) * label_skips.y
 			for x = 1, wm-2 do
 				-- Place the content of the label
 				local label_nodes = labels_nodes[model[mi]]
-				for k = 1, #label_skips do
-					nodes[vi + label_skips[k]] = label_nodes[k]
+				for k = 1, #label_strides do
+					nodes[vi + label_strides[k]] = label_nodes[k]
 				end
 				mi = mi+1
 				vi = vi + label_skips.x
@@ -607,6 +631,8 @@ local function generate_model(pos1, pos2, modelinfo)
 
 	vm:set_data(nodes)
 	vm:write_to_map()
+
+	log("Done.")
 end
 
 local version_head = "modelsynth_v1\n"
@@ -704,7 +730,11 @@ local function print_modelinfo(modelinfo)
 	local ids = modelinfo.nodeids
 	for i = 0, modelinfo.num_labels-1 do
 		local l = modelinfo.labels[i]
-		print(("%d: %s, %s, %s"):format(i, ids[l[1]], ids[l[2]], ids[l[3]]))
+		local s = i .. ": "
+		for k = 1,#l do
+			s = s .. ids[l[k]] .. ", "
+		end
+		print(s)
 	end
 	print("Adjacencies:")
 	for dir, t in pairs(modelinfo.adjacencies) do
@@ -746,7 +776,7 @@ worldedit.register_command("synth", {
 			minetest.chat_send_player(playername, "Cannot load modelinfo: " ..
 				errormsg)
 		end
-		--~ print_modelinfo(modelinfo)
+		print_modelinfo(modelinfo)
 
 		generate_model(pos1, pos2, modelinfo)
 
