@@ -561,7 +561,7 @@ local function generate_model(pos1, pos2, modelinfo)
 	-- Generate in each region, add more regions if it failed
 	repeat
 		local region = regions:take()
-		--~ log_verbose("Trying to generate region " .. dump_region(region))
+		log_verbose("Trying to generate region " .. dump_region(region))
 		if not generate_chunk(modelinfo, region, model) then
 			--~ log_verbose("Failed to generate " .. dump_region(region) ..
 				--~ ", subdividing…")
@@ -776,7 +776,7 @@ worldedit.register_command("synth", {
 			minetest.chat_send_player(playername, "Cannot load modelinfo: " ..
 				errormsg)
 		end
-		print_modelinfo(modelinfo)
+		--~ print_modelinfo(modelinfo)
 
 		generate_model(pos1, pos2, modelinfo)
 
@@ -785,4 +785,4 @@ worldedit.register_command("synth", {
 })
 
 -- TODO: maybe use AC2001?,
--- it always generates air now…
+-- the output model is cut off where it should connect for some reason
